@@ -20,6 +20,7 @@ cv::Mat eigenvalues;
 cv::Mat mean1;
 cv::Mat labels;
 std::vector<cv::Mat> projections;
+std::vector<int> etiquetas;
 
 vector<Mat> LeerImagenes(vector<Mat>& imagenes, string seleccion)
 {
@@ -36,6 +37,27 @@ vector<Mat> LeerImagenes(vector<Mat>& imagenes, string seleccion)
         imagenes.push_back(imread(path,CV_LOAD_IMAGE_COLOR));
         //cout << path << endl;
         path = "C:\\Users\\Hitzu\\Documents\\proyectosQT\\clasificador\\train\\";
+    }
+    fe.close();
+    return imagenes;
+}
+
+vector<Mat> LeerImagenesTest(string seleccion)
+{
+    vector<Mat> imagenes;
+    cout << "Iniciando carga de imagenes de prueba: " << seleccion << endl;
+    char cadena[128];
+    //Aqui ponemos el path al archivo con las fotos de los menores de edad hasta 18 años
+    string path = "C:\\Users\\Hitzu\\Documents\\proyectosQT\\clasificador\\test\\";
+    //leyendo el archivo
+    ifstream fe("C:\\Users\\Hitzu\\Documents\\proyectosQT\\clasificador\\test\\"+seleccion);
+    while(!fe.eof())
+    {
+        fe.getline(cadena,128);
+        path = path + cadena;
+        imagenes.push_back(imread(path,CV_LOAD_IMAGE_COLOR));
+        //cout << path << endl;
+        path = "C:\\Users\\Hitzu\\Documents\\proyectosQT\\clasificador\\test\\";
     }
     fe.close();
     return imagenes;
@@ -110,30 +132,50 @@ vector<Mat> preprocesamiento(vector<Mat>& imagenes)
     cout << "Iniciando procesamiento de las imagenes " << endl;
     vector<Mat> procesadas;
     Mat modificada, recortada;
+    int eliminadas;
+    Vector<int> posiciones;
     for(int i = 0; i < imagenes.size(); i ++)
     {
-        //cvtColor(imagenes[i], modificada, CV_BGR2GRAY);
-        //equalizeHist(modificada,modificada);
+        cvtColor(imagenes[i], modificada, CV_BGR2GRAY);
+        equalizeHist(modificada,modificada);
         modificada = imagenes[i];
         CascadeClassifier face_cascade;
         face_cascade.load( "C://opencv//sources//data//haarcascades//haarcascade_frontalface_alt2.xml" );
 
         std::vector<Rect> faces;
         face_cascade.detectMultiScale( modificada, faces, 1.1, 2, 0|CV_HAAR_SCALE_IMAGE, Size(30, 30) );
-        for( int i = 0; i < faces.size(); i++ )
+        for( int j = 0; j < faces.size(); j++ )
         {
             //recortamos la parte de interes (cara)
-            Rect myROI( faces[i].x, faces[i].y, (faces[i].width), (faces[i].height) );
+            Rect myROI( faces[j].x, faces[j].y, (faces[j].width), (faces[j].height) );
             recortada = modificada(myROI);
             cv::resize(recortada, recortada, cv::Size(211,211));
         }
-        //los filtros se colocaran en esta parte
-        //recortada = canny(recortada);
-        //recortada = laplace(recortada);
-        //recortada = sobel(recortada);
-        //recortada = transformadaH(recortada);
-        procesadas.push_back(recortada);
+        if(faces.size() == 1)
+        {
+            //los filtros se colocaran en esta parte
+            //recortada = canny(recortada);
+            //recortada = laplace(recortada);
+            //recortada = sobel(recortada);
+            //recortada = transformadaH(recortada);
+            procesadas.push_back(recortada);
+        }
+        else
+        {
+            posiciones.push_back(i);
+            //etiquetas.erase(etiquetas.begin()+i);
+            //eliminadas++;
+            //cout << eliminadas << endl;
+        }
     }
+    //eliminando etiquetas
+    for( int j = 0; j < posiciones.size(); j++ )
+    {
+        etiquetas.erase(etiquetas.begin()+(posiciones[j]-j));
+        //cout << "eliminadas" << endl;
+        //cout << posiciones[j] << endl;
+    }
+
     return procesadas;
 }
 
@@ -270,13 +312,39 @@ void train(vector<Mat>& src, InputArray _lbls) {
     }
 }
 
+int predict(Mat _src) {
+    Mat src = _src;
+    // check data alignment just for clearer exception messages
+    if(projections.empty()) {
+        // throw error if no data (or simply return -1?)
+        string error_message = "This model is not computed yet. Did you call train?";
+        CV_Error(CV_StsBadArg, error_message);
+    } else if(src.total() != (size_t) eigenvectors.rows) {
+        string error_message = format("Wrong input image size. Reason: Training and Test images must be of equal size! Expected an image with %d elements, but got %d.", eigenvectors.rows, src.total());
+        CV_Error(CV_StsBadArg, error_message);
+    }
+    // project into LDA subspace
+    Mat q = subspaceProject(eigenvectors, mean1, src.reshape(1,1));
+    // find 1-nearest neighbor
+    double minDist = DBL_MAX;
+    double threshold = DBL_MAX;
+    int minClass = -1;
+    for(size_t sampleIdx = 0; sampleIdx < projections.size(); sampleIdx++) {
+        double dist = norm(projections[sampleIdx], q, NORM_L2);
+        if((dist < minDist) && (dist < threshold)) {
+            minDist = dist;
+            minClass = labels.at<int>((int)sampleIdx);
+        }
+    }
+    return minClass;
+}
+
 
 int main()
 {
     int i;
     vector<Mat> imagenes;
     imagenes = LeerImagenes(imagenes,"menores.txt");
-    vector<int> etiquetas;
     int tammenores = imagenes.size();
     for(i = 0; i < tammenores; i++)
     {
@@ -293,7 +361,65 @@ int main()
     train(imagenes,etiquetas);
     cout << "se acaba la creacion de modelos " << endl;
     //empieza fase de prediccion
-    vector<Mat> pruebas;
+    vector<Mat> menores;
+    menores = LeerImagenesTest("menores.txt");
+    vector<Mat> mayores;
+    mayores = LeerImagenesTest("mayores.txt");
+
+    menores = preprocesamiento(menores);
+    mayores = preprocesamiento(mayores);
+
+    //recorriendo los arreglos de imagenes para predicciones
+    int resultado;
+    int correcto = 0;
+    int incorrecto = 0;
+    int correctos_menores = 0;
+    int correctos_mayores = 0;
+
+    for(i = 0; i < menores.size(); i++)
+    {
+        resultado = predict(menores[i]);
+        if(resultado == 0)
+        {
+            correctos_menores++;
+            correcto++;
+        }
+        else
+        {
+            incorrecto++;
+        }
+    }
+
+    //limpiando el resultado
+    resultado = -1;
+    for(i = 0; i < mayores.size(); i++)
+    {
+        resultado = predict(mayores[i]);
+        if(resultado == 1)
+        {
+            correctos_mayores++;
+            correcto++;
+        }
+        else
+        {
+            incorrecto++;
+        }
+    }
+
+    cout << "Con " << imagenes.size() << " imagenes de entrenamiento" << endl;
+    cout << "de tamaño " << menores[0].rows << " pixeles se obtiene" << endl;
+
+    cout << "Hay: " << correctos_menores << " aciertos y " << menores.size() - correctos_menores  << " errores en el grupo de los menores de: " << menores.size() << endl;
+    cout << "Hay: " << correctos_mayores << " aciertos y " << mayores.size() - correctos_mayores << " errores en el grupo de los mayores de: " << mayores.size() << endl;
+
+    //los valores
+
+
+    int total = menores.size() + mayores.size();
+    cout << "La muestra total es de: " << total << " con: " << correcto << " aciertos y " << incorrecto <<  "errores" << endl;
+
+    double porcentaje = (correcto*100)/total;
+    cout << "Lo que nos da una efectividad del: " << porcentaje << " Por ciento en PCA + LDA" << endl;
 
 
     waitKey(0);
